@@ -1,0 +1,4 @@
+([('FocusTracker',
+   "/Users/augustinthomas/Documents/GitHub/Augustin's Focus "
+   'Tracker/dist/FocusTracker',
+   'EXECUTABLE')],)
