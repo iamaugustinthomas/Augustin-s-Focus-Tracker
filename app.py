@@ -34,13 +34,45 @@ APPLESCRIPT_ACTIVE_APP = [
     'tell application "System Events" to get name of first application process whose frontmost is true'
 ]
 
-# Daily Bosses Roster (Rotates by Day of Year)
+# Daily Bosses Roster
 DAILY_BOSSES = [
     {"name": "The Dopamine Leviathan", "hp": 180, "avatar": "🐉", "title": "Devourer of Deep Work"},
     {"name": "Chronos the Time Thief", "hp": 200, "avatar": "⏳", "title": "Master of Procrastination"},
     {"name": "Siren of Infinite Scroll", "hp": 160, "avatar": "🧜‍♀️", "title": "Hypnotist of the Feed"},
     {"name": "The Context-Switch Hydra", "hp": 220, "avatar": "🐍", "title": "Fragmenter of Attention"},
     {"name": "Lord Entropy", "hp": 240, "avatar": "🕳️", "title": "Architect of Chaos"}
+]
+
+# Store Catalog
+SHOP_ITEMS = [
+    {
+        "id": "pass_15",
+        "name": "15m Guilt-Free Pass",
+        "cost": 350,
+        "icon": "🎟️",
+        "desc": "Unlocks 15m of guilt-free browsing/YouTube. Freezes your streak & multiplier!"
+    },
+    {
+        "id": "elixir",
+        "name": "Neural Purge Elixir",
+        "cost": 400,
+        "icon": "🧪",
+        "desc": "Instantly clears the 23-minute Cognitive Tax residue penalty."
+    },
+    {
+        "id": "shield",
+        "name": "Forge Aegis Shield",
+        "cost": 500,
+        "icon": "🛡️",
+        "desc": "Adds +1 Aegis Streak Shield (Max 3) to block a future -230 XP penalty."
+    },
+    {
+        "id": "overclock",
+        "name": "30m 2x XP Overclock",
+        "cost": 600,
+        "icon": "⚡",
+        "desc": "Doubles all XP and Critical Hit payouts for the next 30 minutes!"
+    }
 ]
 
 def play_sound(sound_name):
@@ -70,16 +102,6 @@ def get_active_app():
     except Exception:
         return "Unknown"
 
-def is_break_time(now):
-    """Check if current minute falls in configured rest windows."""
-    minute_of_day = now.hour * 60 + now.minute
-    for start, end in PAUSE_WINDOWS_MINUTES:
-        if start <= minute_of_day <= end:
-            return True, "Scheduled Off-Hours"
-    if now.minute < ALLOWED_BREAK_MINUTES_PER_HOUR:
-        return True, f"Hourly Recharge ({ALLOWED_BREAK_MINUTES_PER_HOUR - now.minute}m left)"
-    return False, ""
-
 def ensure_log_initialized():
     """Ensure CSV file exists with header."""
     if not os.path.exists(LOG_FILE):
@@ -90,7 +112,7 @@ def ensure_log_initialized():
             pass
 
 # -------------------------------------------------------------
-# Lightweight RPG State Manager (Shields, Crits, Bosses, Quests)
+# RPG State & Wallet Manager
 # -------------------------------------------------------------
 def load_rpg_state():
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -101,9 +123,12 @@ def load_rpg_state():
         "crit_hits_today": 0,
         "loot_Chests_today": 0,
         "shields_saved_today": 0,
-        "last_date": today_str,
-        "lifetime_crits": 0,
-        "lifetime_bosses_slain": 0
+        "spent_xp": 0,
+        "vip_pass_until_ts": 0.0,
+        "overclock_until_ts": 0.0,
+        "tax_purged_at_ts": 0.0,
+        "purchase_history": [],
+        "last_date": today_str
     }
     if not os.path.exists(STATE_FILE):
         save_rpg_state(default_state)
@@ -111,6 +136,9 @@ def load_rpg_state():
     try:
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
+        for k, v in default_state.items():
+            if k not in data:
+                data[k] = v
         if data.get("last_date") != today_str:
             data["crit_hits_today"] = 0
             data["loot_Chests_today"] = 0
@@ -128,11 +156,28 @@ def save_rpg_state(state):
     except Exception:
         pass
 
+def is_break_time(now, rpg_state):
+    """Checks both scheduled rest windows and purchased VIP Guilt-Free Passes."""
+    now_ts = now.timestamp()
+    vip_until = rpg_state.get("vip_pass_until_ts", 0.0)
+    if now_ts < vip_until:
+        rem = int((vip_until - now_ts) // 60) + 1
+        return True, f"🎟️ VIP Guilt-Free Pass ({rem}m left)"
+
+    minute_of_day = now.hour * 60 + now.minute
+    for start, end in PAUSE_WINDOWS_MINUTES:
+        if start <= minute_of_day <= end:
+            return True, "Scheduled Off-Hours"
+    if now.minute < ALLOWED_BREAK_MINUTES_PER_HOUR:
+        return True, f"Hourly Recharge ({ALLOWED_BREAK_MINUTES_PER_HOUR - now.minute}m left)"
+    return False, ""
+
 # -------------------------------------------------------------
 # Storage-Optimized Reverse Scanner (O(1) RAM)
 # -------------------------------------------------------------
 def get_stats_optimized():
     ensure_log_initialized()
+    rpg = load_rpg_state()
     daily_pts = 0
     weekly_pts = 0
     last_distraction_ts = 0.0
@@ -212,13 +257,39 @@ def get_stats_optimized():
     multiplier = min(1.0 + (min(current_streak, 60) // 15) * 0.5, 3.0)
     in_recovery = False
     minutes_left = 0
-    if last_distraction_ts > 0.0:
+
+    # Check if Neural Elixir purged the distraction tax
+    purged_at = rpg.get("tax_purged_at_ts", 0.0)
+    if last_distraction_ts > purged_at:
         elapsed = now_ts - last_distraction_ts
         if elapsed < RECOVERY_SECONDS:
             in_recovery = True
             minutes_left = int((RECOVERY_SECONDS - elapsed) // 60) + 1
 
     return daily_pts, weekly_pts, in_recovery, minutes_left, current_streak, multiplier
+
+def get_lifetime_xp_and_wallet():
+    """Computes total lifetime positive XP and available spendable Gold XP."""
+    ensure_log_initialized()
+    rpg = load_rpg_state()
+    lifetime_earned = 0
+    try:
+        with open(LOG_FILE, "rb") as f:
+            f.readline()
+            for raw_line in f:
+                parts = raw_line.strip().split(b",")
+                if len(parts) >= 3:
+                    try:
+                        pts = int(parts[2])
+                        if pts > 0:
+                            lifetime_earned += pts
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    spent = rpg.get("spent_xp", 0)
+    wallet_balance = max(0, lifetime_earned - spent)
+    return lifetime_earned, wallet_balance
 
 def log_result_fast(status: str, pts: int):
     """Direct binary append without encoding overhead."""
@@ -231,14 +302,16 @@ def log_result_fast(status: str, pts: int):
         pass
 
 # -------------------------------------------------------------
-# Zero-Crash Addictive Apple Gamified Command Center
+# Zero-Crash Addictive Apple Gamified Command Center + Store
 # -------------------------------------------------------------
 def launch_apple_gamified_gui():
     ensure_log_initialized()
     rpg = load_rpg_state()
     d_pts, w_pts, in_recovery, min_left, streak, mult = get_stats_optimized()
+    lifetime_earned, wallet_balance = get_lifetime_xp_and_wallet()
 
     now = datetime.now()
+    now_ts = now.timestamp()
     cutoff_ts = (now - timedelta(days=7)).timestamp()
     today_str = now.strftime("%Y-%m-%d")
 
@@ -247,7 +320,6 @@ def launch_apple_gamified_gui():
     daily_scores = {d: 0 for d in days_list}
     daily_focus_mins = {d: 0 for d in days_list}
 
-    total_xp = 0
     best_streak = 0
     temp_streak = 0
     total_focus_mins = 0
@@ -256,7 +328,6 @@ def launch_apple_gamified_gui():
     total_checks_7d = 0
     focus_checks_7d = 0
     recent_events = []
-    hourly_heatmap = [0] * 24
 
     try:
         with open(LOG_FILE, "rb") as f:
@@ -274,8 +345,6 @@ def launch_apple_gamified_gui():
                 except Exception:
                     continue
 
-                if pts > 0:
-                    total_xp += pts
                 if status_str.startswith("Yes"):
                     temp_streak += 1
                     total_focus_mins += 1
@@ -290,7 +359,6 @@ def launch_apple_gamified_gui():
                         daily_scores[d_prefix] += pts
                         if status_str.startswith("Yes"):
                             daily_focus_mins[d_prefix] += 1
-                            hourly_heatmap[dt_obj.hour] += 1
 
                     if "Break" not in status_str and status_str != "Error":
                         total_checks_7d += 1
@@ -314,7 +382,7 @@ def launch_apple_gamified_gui():
     recent_events = list(reversed(recent_events[-14:]))
     consistency = round((focus_checks_7d / total_checks_7d * 100), 1) if total_checks_7d > 0 else 100.0
 
-    # Daily Boss Battle Computation
+    # Daily Boss Battle
     boss_idx = now.timetuple().tm_yday % len(DAILY_BOSSES)
     boss = DAILY_BOSSES[boss_idx]
     boss_max_hp = boss["hp"]
@@ -322,7 +390,7 @@ def launch_apple_gamified_gui():
     boss_hp_pct = round((boss_rem_hp / boss_max_hp) * 100, 1)
     boss_slain = boss_rem_hp == 0
 
-    # Daily Quests (Auto-tracked)
+    # Daily Quests
     quests = [
         {
             "title": "Ignition Sequence",
@@ -358,9 +426,7 @@ def launch_apple_gamified_gui():
         }
     ]
 
-    # Add Quest Bonus XP
-    quest_bonus = sum(300 for q in quests if q["done"])
-    total_xp += quest_bonus
+    total_xp = lifetime_earned + sum(300 for q in quests if q["done"])
 
     # RPG Level & Prestige Rank
     ranks = [
@@ -386,7 +452,7 @@ def launch_apple_gamified_gui():
     tier_span = max(1, next_rank_xp - prev_rank_xp)
     xp_pct = min(100, round((xp_in_tier / tier_span) * 100, 1))
 
-    # Apple Fitness Rings
+    # Rings
     ring1_pct = min(100, round((today_focus_mins / 180) * 100))
     ring2_pct = min(100, round((streak / 60) * 100))
     ring3_pct = min(100, round(consistency))
@@ -395,24 +461,26 @@ def launch_apple_gamified_gui():
     shield_progress = rpg.get("streak_shield_counter", 0)
     shields_display = "🛡️" * shields_count + "⚫" * (3 - shields_count)
 
-    # Unlockable Achievements
-    badges = [
-        {"name": "First Blood", "desc": "Deal 15m damage to a Daily Boss", "icon": "🗡️", "unlocked": total_focus_mins >= 15},
-        {"name": "Godlike Streak", "desc": "Hit a 60m unbroken flow streak", "icon": "🔥", "unlocked": best_streak >= 60},
-        {"name": "Lucky Seven", "desc": "Land a 5x Legendary Loot Jackpot", "icon": "🎰", "unlocked": rpg.get("loot_Chests_today", 0) > 0 or total_xp >= 2500},
-        {"name": "Aegis Immortal", "desc": "Block a distraction with a Streak Shield", "icon": "🛡️", "unlocked": rpg.get("shields_saved_today", 0) > 0 or shields_count >= 2},
-        {"name": "Boss Slayer", "desc": "Defeat a Daily Boss (100% HP depleted)", "icon": "💀", "unlocked": boss_slain or best_streak >= 90},
-        {"name": "Apex Mind", "desc": "Pass 15,000+ Lifetime Focus XP", "icon": "👑", "unlocked": total_xp >= 15000}
-    ]
+    # Active Buffs Banner
+    active_buffs = []
+    if now_ts < rpg.get("vip_pass_until_ts", 0.0):
+        m_rem = int((rpg["vip_pass_until_ts"] - now_ts) // 60) + 1
+        active_buffs.append(f"🎟️ VIP Guilt-Free Pass Active ({m_rem}m left)")
+    if now_ts < rpg.get("overclock_until_ts", 0.0):
+        m_rem = int((rpg["overclock_until_ts"] - now_ts) // 60) + 1
+        active_buffs.append(f"⚡ 2x XP Overclock Booster Active ({m_rem}m left)")
+
+    buff_str = " · ".join(active_buffs) if active_buffs else "No temporary shop buffs active — Purchase perks from the Menubar!"
 
     scores_array = [daily_scores[d] for d in days_list]
     mins_array = [daily_focus_mins[d] for d in days_list]
+    purchases = list(reversed(rpg.get("purchase_history", [])[-6:]))
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Flow · Gamified Neural Arena</title>
+<title>Flow · Gamified Neural Arena & XP Store</title>
 <style>
     :root {{
         --bg-dark: #07070b;
@@ -429,218 +497,177 @@ def launch_apple_gamified_gui():
         --apple-gold: #ffd60a;
     }}
     * {{
-        box-sizing: border-box;
-        margin: 0;
-        padding: 0;
+        box-sizing: border-box; margin: 0; padding: 0;
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", sans-serif;
         -webkit-font-smoothing: antialiased;
     }}
     body {{
         background: radial-gradient(circle at 10% 10%, #241445 0%, #07070b 50%),
                     radial-gradient(circle at 90% 85%, #0c2b40 0%, #07070b 55%);
-        background-color: var(--bg-dark);
-        color: var(--text-main);
-        min-height: 100vh;
-        padding: 32px 38px;
+        background-color: var(--bg-dark); color: var(--text-main);
+        min-height: 100vh; padding: 30px 36px;
     }}
-    .container {{ max-width: 1220px; margin: 0 auto; }}
+    .container {{ max-width: 1240px; margin: 0 auto; }}
 
     /* Top RPG Player Bar */
     .hero-header {{
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        background: var(--card-bg);
-        backdrop-filter: blur(30px);
-        border: 1px solid var(--card-border);
-        border-radius: 24px;
-        padding: 22px 30px;
-        margin-bottom: 20px;
+        display: flex; justify-content: space-between; align-items: center;
+        background: var(--card-bg); backdrop-filter: blur(30px);
+        border: 1px solid var(--card-border); border-radius: 24px;
+        padding: 20px 28px; margin-bottom: 18px;
         box-shadow: 0 20px 50px rgba(0,0,0,0.5);
     }}
     .player-info {{ display: flex; align-items: center; gap: 18px; }}
     .avatar-orb {{
-        width: 74px; height: 74px; border-radius: 22px;
+        width: 70px; height: 70px; border-radius: 20px;
         background: linear-gradient(135deg, #0a84ff, #bf5af2, #fa114f);
         display: flex; align-items: center; justify-content: center;
-        font-size: 38px;
-        box-shadow: 0 0 30px rgba(191, 90, 242, 0.55);
+        font-size: 36px; box-shadow: 0 0 30px rgba(191, 90, 242, 0.55);
     }}
     .rank-badge {{
         display: inline-block; font-size: 11px; font-weight: 800;
         text-transform: uppercase; letter-spacing: 1.2px;
         padding: 4px 10px; border-radius: 99px;
         background: rgba(255, 214, 10, 0.15); color: var(--apple-gold);
-        border: 1px solid rgba(255, 214, 10, 0.4); margin-bottom: 6px;
+        border: 1px solid rgba(255, 214, 10, 0.4); margin-bottom: 5px;
     }}
-    .player-title {{ font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }}
-    .shield-box {{
-        background: rgba(255,255,255,0.04);
-        border: 1px solid var(--card-border);
-        padding: 12px 20px;
-        border-radius: 18px;
-        text-align: center;
-    }}
-    .shield-icons {{ font-size: 22px; letter-spacing: 4px; margin-bottom: 4px; }}
-    .shield-sub {{ font-size: 11px; color: var(--text-muted); font-weight: 600; }}
+    .player-title {{ font-size: 26px; font-weight: 800; }}
 
-    .xp-box {{ min-width: 320px; text-align: right; }}
+    .wallet-pill {{
+        background: linear-gradient(135deg, rgba(255, 214, 10, 0.18), rgba(255, 159, 10, 0.12));
+        border: 1px solid rgba(255, 214, 10, 0.45);
+        padding: 12px 22px; border-radius: 18px; text-align: center;
+        box-shadow: 0 0 25px rgba(255, 214, 10, 0.15);
+    }}
+    .wallet-val {{ font-size: 24px; font-weight: 900; color: var(--apple-gold); }}
+    .wallet-sub {{ font-size: 10px; font-weight: 800; text-transform: uppercase; color: #f5f5f7; letter-spacing: 1px; }}
+
+    .shield-box {{
+        background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
+        padding: 12px 18px; border-radius: 18px; text-align: center;
+    }}
+    .shield-icons {{ font-size: 20px; letter-spacing: 4px; margin-bottom: 4px; }}
+    .shield-sub {{ font-size: 10px; color: var(--text-muted); font-weight: 700; }}
+
+    .xp-box {{ min-width: 280px; text-align: right; }}
     .xp-labels {{
         display: flex; justify-content: space-between;
-        font-size: 13px; color: var(--text-muted);
-        margin-bottom: 8px; font-weight: 700;
+        font-size: 12px; color: var(--text-muted); margin-bottom: 8px; font-weight: 700;
     }}
-    .xp-bar-bg {{
-        width: 100%; height: 13px; background: rgba(255,255,255,0.08);
-        border-radius: 99px; overflow: hidden;
-    }}
+    .xp-bar-bg {{ width: 100%; height: 12px; background: rgba(255,255,255,0.08); border-radius: 99px; overflow: hidden; }}
     .xp-bar-fill {{
         height: 100%; width: {xp_pct}%;
         background: linear-gradient(90deg, #0a84ff, #bf5af2, #00f5ea);
         border-radius: 99px;
-        box-shadow: 0 0 18px rgba(0, 245, 234, 0.7);
+    }}
+
+    /* Buff Banner */
+    .buff-banner {{
+        background: rgba(10, 132, 255, 0.12);
+        border: 1px solid rgba(10, 132, 255, 0.35);
+        color: #64d2ff;
+        padding: 11px 22px; border-radius: 14px; margin-bottom: 18px;
+        font-size: 13px; font-weight: 700;
+        display: flex; justify-content: space-between; align-items: center;
     }}
 
     /* Boss Battle Banner */
     .boss-card {{
         background: linear-gradient(135deg, rgba(45, 14, 30, 0.8), rgba(20, 20, 32, 0.85));
-        border: 1px solid rgba(250, 17, 79, 0.35);
-        border-radius: 24px;
-        padding: 20px 28px;
-        margin-bottom: 22px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 24px;
-        box-shadow: 0 15px 40px rgba(250, 17, 79, 0.15);
+        border: 1px solid rgba(250, 17, 79, 0.35); border-radius: 24px;
+        padding: 18px 26px; margin-bottom: 20px;
+        display: flex; align-items: center; justify-content: space-between; gap: 24px;
     }}
-    .boss-left {{ display: flex; align-items: center; gap: 18px; }}
+    .boss-left {{ display: flex; align-items: center; gap: 16px; }}
     .boss-avatar {{
-        font-size: 44px;
-        width: 68px; height: 68px;
-        background: rgba(250, 17, 79, 0.15);
-        border: 1px solid rgba(250, 17, 79, 0.4);
-        border-radius: 20px;
-        display: flex; align-items: center; justify-content: center;
+        font-size: 40px; width: 62px; height: 62px;
+        background: rgba(250, 17, 79, 0.15); border: 1px solid rgba(250, 17, 79, 0.4);
+        border-radius: 18px; display: flex; align-items: center; justify-content: center;
     }}
-    .boss-tag {{
-        font-size: 10px; font-weight: 800; text-transform: uppercase;
-        letter-spacing: 1.4px; color: #ff453a;
-    }}
-    .boss-name {{ font-size: 22px; font-weight: 800; }}
-    .boss-hp-wrap {{ flex: 1; max-width: 520px; }}
-    .boss-hp-top {{
-        display: flex; justify-content: space-between;
-        font-size: 12px; font-weight: 700; margin-bottom: 8px;
-    }}
-    .boss-hp-bar {{
-        width: 100%; height: 16px; background: rgba(0,0,0,0.45);
-        border-radius: 99px; overflow: hidden;
-        border: 1px solid rgba(255,255,255,0.1);
-    }}
-    .boss-hp-fill {{
-        height: 100%; width: {boss_hp_pct}%;
-        background: linear-gradient(90deg, #ff453a, #ff9f0a);
-        box-shadow: 0 0 15px rgba(255, 69, 58, 0.6);
-        transition: width 0.8s ease;
-    }}
+    .boss-tag {{ font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.4px; color: #ff453a; }}
+    .boss-name {{ font-size: 20px; font-weight: 800; }}
+    .boss-hp-wrap {{ flex: 1; max-width: 500px; }}
+    .boss-hp-top {{ display: flex; justify-content: space-between; font-size: 12px; font-weight: 700; margin-bottom: 7px; }}
+    .boss-hp-bar {{ width: 100%; height: 14px; background: rgba(0,0,0,0.45); border-radius: 99px; overflow: hidden; border: 1px solid rgba(255,255,255,0.1); }}
+    .boss-hp-fill {{ height: 100%; width: {boss_hp_pct}%; background: linear-gradient(90deg, #ff453a, #ff9f0a); }}
 
-    /* Main Grid */
-    .bento-grid {{
-        display: grid;
-        grid-template-columns: 350px 1fr;
-        gap: 22px;
-        margin-bottom: 22px;
-    }}
+    /* Main Bento Grid */
+    .bento-grid {{ display: grid; grid-template-columns: 340px 1fr; gap: 20px; margin-bottom: 20px; }}
     .glass-card {{
-        background: var(--card-bg);
-        backdrop-filter: blur(25px);
-        border: 1px solid var(--card-border);
-        border-radius: 24px;
-        padding: 24px;
-        box-shadow: 0 16px 40px rgba(0,0,0,0.35);
+        background: var(--card-bg); backdrop-filter: blur(25px);
+        border: 1px solid var(--card-border); border-radius: 24px;
+        padding: 22px; box-shadow: 0 16px 40px rgba(0,0,0,0.35);
     }}
     .card-heading {{
         font-size: 12px; font-weight: 800; text-transform: uppercase;
         letter-spacing: 1.1px; color: var(--text-muted);
-        margin-bottom: 18px; display: flex; justify-content: space-between;
+        margin-bottom: 16px; display: flex; justify-content: space-between;
     }}
 
     /* Rings */
     .rings-wrapper {{ display: flex; flex-direction: column; align-items: center; }}
-    .rings-svg-box {{ position: relative; width: 200px; height: 200px; margin-bottom: 18px; }}
-    .rings-center-label {{
-        position: absolute; inset: 0;
-        display: flex; flex-direction: column; align-items: center; justify-content: center;
-    }}
-    .big-mult {{
-        font-size: 30px; font-weight: 900;
-        color: {"#ffd60a" if mult >= 2.5 else "#fff"};
-        text-shadow: 0 0 18px rgba(255, 214, 10, 0.4);
-    }}
+    .rings-svg-box {{ position: relative; width: 190px; height: 190px; margin-bottom: 16px; }}
+    .rings-center-label {{ position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }}
+    .big-mult {{ font-size: 28px; font-weight: 900; color: {"#ffd60a" if mult >= 2.5 else "#fff"}; }}
     .sub-mult {{ font-size: 10px; color: var(--text-muted); text-transform: uppercase; font-weight: 700; }}
-    .ring-legend {{ width: 100%; display: flex; flex-direction: column; gap: 9px; }}
-    .legend-row {{
-        display: flex; justify-content: space-between; font-size: 13px;
-        padding: 8px 12px; background: rgba(255,255,255,0.03); border-radius: 10px;
-    }}
-    .dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; }}
+    .ring-legend {{ width: 100%; display: flex; flex-direction: column; gap: 8px; }}
+    .legend-row {{ display: flex; justify-content: space-between; font-size: 12px; padding: 7px 11px; background: rgba(255,255,255,0.03); border-radius: 10px; }}
+    .dot {{ width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 7px; }}
 
-    .right-col {{ display: flex; flex-direction: column; gap: 22px; }}
+    .right-col {{ display: flex; flex-direction: column; gap: 20px; }}
     .kpi-row {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }}
-    .kpi-capsule {{
-        background: rgba(255,255,255,0.04); border: 1px solid var(--card-border);
-        border-radius: 18px; padding: 15px 18px;
-    }}
-    .kpi-title {{ font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; }}
-    .kpi-value {{ font-size: 25px; font-weight: 800; }}
+    .kpi-capsule {{ background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); border-radius: 18px; padding: 14px 16px; }}
+    .kpi-title {{ font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 5px; }}
+    .kpi-value {{ font-size: 24px; font-weight: 800; }}
 
     /* Bars */
     .bars-container {{
         display: grid; grid-template-columns: repeat(7, 1fr);
-        gap: 14px; align-items: end; height: 175px;
-        padding-top: 20px; border-bottom: 1px solid rgba(255,255,255,0.08);
+        gap: 14px; align-items: end; height: 165px;
+        padding-top: 18px; border-bottom: 1px solid rgba(255,255,255,0.08);
     }}
     .bar-col {{ display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }}
-    .bar-val {{ font-size: 11px; font-weight: 700; margin-bottom: 6px; }}
-    .bar-pill {{ width: 34px; border-radius: 10px 10px 4px 4px; min-height: 6px; }}
-    .bar-day {{ margin-top: 8px; font-size: 12px; font-weight: 600; color: var(--text-muted); }}
+    .bar-val {{ font-size: 11px; font-weight: 700; margin-bottom: 5px; }}
+    .bar-pill {{ width: 32px; border-radius: 10px 10px 4px 4px; min-height: 6px; }}
+    .bar-day {{ margin-top: 8px; font-size: 11px; font-weight: 600; color: var(--text-muted); }}
 
-    /* Quests & Badges Row */
-    .bottom-grid {{ display: grid; grid-template-columns: 1fr 1.1fr 0.9fr; gap: 22px; }}
-    .quest-list {{ display: flex; flex-direction: column; gap: 12px; }}
-    .quest-item {{
-        background: rgba(255,255,255,0.03); border: 1px solid var(--card-border);
-        padding: 12px 14px; border-radius: 14px;
+    /* Store Section */
+    .store-card {{ margin-bottom: 20px; border-color: rgba(255, 214, 10, 0.28); }}
+    .store-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }}
+    .shop-item {{
+        background: linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+        border: 1px solid var(--card-border); border-radius: 18px;
+        padding: 18px; display: flex; flex-direction: column; justify-content: space-between;
+        position: relative;
     }}
-    .quest-item.done {{
-        border-color: rgba(48, 209, 88, 0.5);
-        background: rgba(48, 209, 88, 0.08);
+    .shop-item.affordable {{ border-color: rgba(255, 214, 10, 0.45); }}
+    .shop-top {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
+    .shop-icon {{ font-size: 32px; }}
+    .shop-price {{
+        background: rgba(255, 214, 10, 0.18); color: var(--apple-gold);
+        border: 1px solid rgba(255, 214, 10, 0.4);
+        font-weight: 800; font-size: 12px; padding: 4px 10px; border-radius: 99px;
     }}
+    .shop-name {{ font-size: 15px; font-weight: 800; margin-bottom: 6px; }}
+    .shop-desc {{ font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-bottom: 12px; }}
+    .shop-hint {{
+        font-size: 11px; font-weight: 700; text-align: center;
+        padding: 8px; border-radius: 10px;
+        background: rgba(255,255,255,0.06); color: #fff;
+    }}
+
+    /* Bottom Grid */
+    .bottom-grid {{ display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; }}
+    .quest-list {{ display: flex; flex-direction: column; gap: 10px; }}
+    .quest-item {{ background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); padding: 11px 14px; border-radius: 14px; }}
+    .quest-item.done {{ border-color: rgba(48, 209, 88, 0.5); background: rgba(48, 209, 88, 0.08); }}
     .quest-top {{ display: flex; justify-content: space-between; font-size: 13px; font-weight: 700; margin-bottom: 4px; }}
-    .quest-desc {{ font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }}
+    .quest-desc {{ font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }}
     .quest-bar-bg {{ height: 6px; background: rgba(255,255,255,0.08); border-radius: 99px; overflow: hidden; }}
     .quest-bar-fill {{ height: 100%; background: linear-gradient(90deg, #30d158, #00f5ea); }}
 
-    .badges-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }}
-    .badge-item {{
-        padding: 13px; border-radius: 16px; border: 1px solid var(--card-border);
-        background: rgba(255,255,255,0.03); display: flex; align-items: center; gap: 12px;
-    }}
-    .badge-item.unlocked {{
-        background: linear-gradient(145deg, rgba(10,132,255,0.14), rgba(191,90,242,0.14));
-        border-color: rgba(191,90,242,0.45);
-    }}
-    .badge-item.locked {{ opacity: 0.3; filter: grayscale(100%); }}
-    .badge-icon {{ font-size: 26px; }}
-    .badge-name {{ font-size: 13px; font-weight: 700; }}
-    .badge-desc {{ font-size: 11px; color: var(--text-muted); }}
-
-    .feed-list {{ display: flex; flex-direction: column; gap: 8px; max-height: 290px; overflow-y: auto; }}
-    .feed-row {{
-        display: flex; justify-content: space-between; align-items: center;
-        padding: 9px 12px; border-radius: 11px; background: rgba(255,255,255,0.03); font-size: 12px;
-    }}
+    .feed-list {{ display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto; }}
+    .feed-row {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 12px; border-radius: 11px; background: rgba(255,255,255,0.03); font-size: 12px; }}
     .pts-tag {{ font-weight: 700; padding: 3px 8px; border-radius: 99px; font-size: 11px; }}
     .pts-pos {{ background: rgba(48, 209, 88, 0.18); color: #30d158; }}
     .pts-crit {{ background: rgba(255, 214, 10, 0.22); color: #ffd60a; border: 1px solid rgba(255,214,10,0.4); }}
@@ -660,18 +687,29 @@ def launch_apple_gamified_gui():
             </div>
         </div>
 
-        <div class="shield-box" title="Every 45m of unbroken focus forges 1 Aegis Shield. Automatically blocks a -230 distraction penalty!">
+        <div class="wallet-pill" title="Spend Gold XP in the Menubar '🛒 Spend XP Store' without losing your Prestige Level!">
+            <div class="wallet-val">🪙 {wallet_balance:,} XP</div>
+            <div class="wallet-sub">Spendable Gold Wallet</div>
+        </div>
+
+        <div class="shield-box">
             <div class="shield-icons">{shields_display}</div>
-            <div class="shield-sub">AEGIS STREAK SHIELDS ({shield_progress}/45m to next)</div>
+            <div class="shield-sub">AEGIS SHIELDS ({shield_progress}/45m)</div>
         </div>
 
         <div class="xp-box">
             <div class="xp-labels">
-                <span>Total Neural XP</span>
-                <span style="color:#fff;">{total_xp:,} / {next_rank_xp:,} XP ({xp_pct}%)</span>
+                <span>Prestige XP</span>
+                <span style="color:#fff;">{total_xp:,} / {next_rank_xp:,} ({xp_pct}%)</span>
             </div>
             <div class="xp-bar-bg"><div class="xp-bar-fill"></div></div>
         </div>
+    </div>
+
+    <!-- Active Shop Perks Banner -->
+    <div class="buff-banner">
+        <span>⚡ <strong>ACTIVE PERKS:</strong> {buff_str}</span>
+        <span>Redeem items anytime via <strong>🧠 Flow → 🛒 Spend XP Store</strong> in your Mac Menubar</span>
     </div>
 
     <!-- Daily Boss Battle Arena -->
@@ -692,6 +730,15 @@ def launch_apple_gamified_gui():
         </div>
     </div>
 
+    <!-- XP Black Market Store -->
+    <div class="glass-card store-card">
+        <div class="card-heading">
+            <span style="color:var(--apple-gold);">🛒 Neural Black Market & Reward Store (Spend Gold XP)</span>
+            <span>Available Balance: 🪙 {wallet_balance:,} XP</span>
+        </div>
+        <div class="store-grid" id="store-root"></div>
+    </div>
+
     <!-- Main Bento Grid -->
     <div class="bento-grid">
         <div class="glass-card rings-wrapper">
@@ -700,7 +747,7 @@ def launch_apple_gamified_gui():
                 <span>{"🔥 FEVER MODE" if mult >= 2.5 else "Active"}</span>
             </div>
             <div class="rings-svg-box">
-                <svg width="200" height="200" viewBox="0 0 210 210" style="transform: rotate(-90deg);">
+                <svg width="190" height="190" viewBox="0 0 210 210" style="transform: rotate(-90deg);">
                     <circle cx="105" cy="105" r="88" stroke="rgba(250, 17, 79, 0.18)" stroke-width="16" fill="none"/>
                     <circle cx="105" cy="105" r="88" stroke="var(--ring-red)" stroke-width="16" fill="none"
                             stroke-dasharray="552.9" stroke-dashoffset="{552.9 - (552.9 * ring1_pct / 100):.1f}" stroke-linecap="round"/>
@@ -735,7 +782,7 @@ def launch_apple_gamified_gui():
         <div class="right-col">
             <div class="kpi-row">
                 <div class="kpi-capsule">
-                    <div class="kpi-title">Today's Score</div>
+                    <div class="kpi-title">Today's Net XP</div>
                     <div class="kpi-value" style="color:#0a84ff;">{d_pts:+d}</div>
                 </div>
                 <div class="kpi-capsule">
@@ -762,28 +809,20 @@ def launch_apple_gamified_gui():
         </div>
     </div>
 
-    <!-- Bottom Grid: Quests, Achievements, Live Combat Log -->
+    <!-- Bottom Grid: Quests & Live Combat Log -->
     <div class="bottom-grid">
         <div class="glass-card">
             <div class="card-heading">
                 <span>📜 Daily Bounties & Quests</span>
-                <span>{sum(1 for q in quests if q["done"])}/4 Done</span>
+                <span>{sum(1 for q in quests if q["done"])}/4 Completed</span>
             </div>
             <div class="quest-list" id="quests-root"></div>
         </div>
 
         <div class="glass-card">
             <div class="card-heading">
-                <span>🏆 Prestige Trophies</span>
-                <span>{sum(1 for b in badges if b["unlocked"])}/{len(badges)}</span>
-            </div>
-            <div class="badges-grid" id="badges-root"></div>
-        </div>
-
-        <div class="glass-card">
-            <div class="card-heading">
                 <span>⚡ Live Combat & Loot Log</span>
-                <span>Last 14</span>
+                <span>Last 14 Pulses</span>
             </div>
             <div class="feed-list" id="feed-root"></div>
         </div>
@@ -795,14 +834,37 @@ def launch_apple_gamified_gui():
     const scores = {json.dumps(scores_array)};
     const mins = {json.dumps(mins_array)};
     const quests = {json.dumps(quests)};
-    const badges = {json.dumps(badges)};
+    const shopItems = {json.dumps(SHOP_ITEMS)};
+    const wallet = {wallet_balance};
     const events = {json.dumps(recent_events)};
 
-    // Bars
+    // Render Store
+    const storeRoot = document.getElementById('store-root');
+    shopItems.forEach(item => {{
+        const canAfford = wallet >= item.cost;
+        const el = document.createElement('div');
+        el.className = 'shop-item ' + (canAfford ? 'affordable' : '');
+        el.innerHTML = `
+            <div>
+                <div class="shop-top">
+                    <span class="shop-icon">${{item.icon}}</span>
+                    <span class="shop-price">🪙 ${{item.cost}} XP</span>
+                </div>
+                <div class="shop-name">${{item.name}}</div>
+                <div class="shop-desc">${{item.desc}}</div>
+            </div>
+            <div class="shop-hint" style="color:${{canAfford ? '#30d158' : '#86868b'}};">
+                ${{canAfford ? '✅ Ready — Click in Menubar Store' : '🔒 Need ' + (item.cost - wallet) + ' more XP'}}
+            </div>
+        `;
+        storeRoot.appendChild(el);
+    }});
+
+    // Render Bars
     const maxAbs = Math.max(...scores.map(s => Math.abs(s)), 100);
     const barsRoot = document.getElementById('bars-root');
     scores.forEach((score, i) => {{
-        const heightPct = Math.max(8, Math.round((Math.abs(score) / maxAbs) * 125));
+        const heightPct = Math.max(8, Math.round((Math.abs(score) / maxAbs) * 120));
         const grad = score >= 0
             ? 'linear-gradient(180deg, #00f5ea, #0a84ff)'
             : 'linear-gradient(180deg, #ff453a, #9e1b12)';
@@ -816,7 +878,7 @@ def launch_apple_gamified_gui():
         barsRoot.appendChild(col);
     }});
 
-    // Quests
+    // Render Quests
     const questsRoot = document.getElementById('quests-root');
     quests.forEach(q => {{
         const pct = Math.min(100, Math.round((q.prog / q.goal) * 100));
@@ -833,22 +895,7 @@ def launch_apple_gamified_gui():
         questsRoot.appendChild(item);
     }});
 
-    // Badges
-    const badgesRoot = document.getElementById('badges-root');
-    badges.forEach(b => {{
-        const el = document.createElement('div');
-        el.className = 'badge-item ' + (b.unlocked ? 'unlocked' : 'locked');
-        el.innerHTML = `
-            <div class="badge-icon">${{b.icon}}</div>
-            <div>
-                <div class="badge-name">${{b.name}}</div>
-                <div class="badge-desc">${{b.desc}}</div>
-            </div>
-        `;
-        badgesRoot.appendChild(el);
-    }});
-
-    // Feed
+    // Render Feed
     const feedRoot = document.getElementById('feed-root');
     events.forEach(ev => {{
         const isCrit = ev.status.includes('CRIT') || ev.status.includes('JACKPOT');
@@ -875,18 +922,32 @@ def launch_apple_gamified_gui():
 
 
 # -------------------------------------------------------------
-# Addictive RPG Menubar App
+# Addictive RPG Menubar App + Interactive XP Store Submenu
 # -------------------------------------------------------------
 class FocusTrackerApp(rumps.App):
     def __init__(self):
+        self.store_menu = rumps.MenuItem("🛒 Spend XP Store")
+        self.item_pass = rumps.MenuItem("🎟️ Buy 15m Guilt-Free Pass (350 XP)", callback=self.buy_vip_pass)
+        self.item_elixir = rumps.MenuItem("🧪 Buy Neural Purge Elixir (400 XP)", callback=self.buy_elixir)
+        self.item_shield = rumps.MenuItem("🛡️ Forge +1 Aegis Shield (500 XP)", callback=self.buy_shield)
+        self.item_overclock = rumps.MenuItem("⚡ Buy 30m 2x XP Overclock (600 XP)", callback=self.buy_overclock)
+
+        self.store_menu.add(self.item_pass)
+        self.store_menu.add(self.item_elixir)
+        self.store_menu.add(self.item_shield)
+        self.store_menu.add(self.item_overclock)
+
         super(FocusTrackerApp, self).__init__(
             "🧠 Flow", 
             menu=[
+                "Wallet: 0 XP",
                 "Today's Points: 0", 
                 "Current Streak: 0m",
                 "Aegis Shields: 🛡️",
-                None, 
+                None,
+                self.store_menu,
                 "🎮 Open Gamified Command Center", 
+                None,
                 "Pause Tracking"
             ]
         )
@@ -897,21 +958,115 @@ class FocusTrackerApp(rumps.App):
     def _refresh_menu_labels(self):
         rpg = load_rpg_state()
         d_pts, _, _, _, streak, mult = get_stats_optimized()
+        _, wallet = get_lifetime_xp_and_wallet()
         shields = rpg.get("shields", 1)
         shield_str = "🛡️" * shields + "⚫" * (3 - shields)
 
-        # Dynamic menubar title shows streak & fever state
+        now_ts = datetime.now().timestamp()
+        vip_active = now_ts < rpg.get("vip_pass_until_ts", 0.0)
+        oc_active = now_ts < rpg.get("overclock_until_ts", 0.0)
+
         if not self.is_paused:
-            if streak >= 60:
+            if vip_active:
+                rem = int((rpg["vip_pass_until_ts"] - now_ts) // 60) + 1
+                self.title = f"🎟️ VIP ({rem}m)"
+            elif oc_active:
+                self.title = f"⚡2x {streak}m"
+            elif streak >= 60:
                 self.title = f"🔥 {streak}m (3x)"
             elif streak >= 15:
                 self.title = f"⚡ {streak}m ({mult}x)"
             else:
                 self.title = f"🧠 {d_pts:+d}"
 
+        self.menu["Wallet: 0 XP"].title = f"🪙 Gold Wallet: {wallet:,} XP"
         self.menu["Today's Points: 0"].title = f"🏆 Today: {d_pts:+d} XP ({mult}x)"
         self.menu["Current Streak: 0m"].title = f"🔥 Streak: {streak}m"
         self.menu["Aegis Shields: 🛡️"].title = f"🛡️ Shields: {shield_str} ({rpg.get('streak_shield_counter',0)}/45m)"
+
+    # ---------------------------------------------------------
+    # Interactive XP Store Purchase Handlers
+    # ---------------------------------------------------------
+    def _deduct_xp(self, cost: int, item_name: str) -> bool:
+        _, wallet = get_lifetime_xp_and_wallet()
+        if wallet < cost:
+            play_sound("Basso")
+            rumps.alert(
+                "Insufficient Gold XP! 🪙",
+                f"You need {cost} XP to buy {item_name}, but your wallet has {wallet} XP.\n\nStay in Flow to earn more XP!"
+            )
+            return False
+        rpg = load_rpg_state()
+        rpg["spent_xp"] = rpg.get("spent_xp", 0) + cost
+        history = rpg.get("purchase_history", [])
+        history.append({"time": datetime.now().strftime("%H:%M"), "item": item_name, "cost": cost})
+        rpg["purchase_history"] = history[-20:]
+        save_rpg_state(rpg)
+        return True
+
+    def buy_vip_pass(self, _):
+        if self._deduct_xp(350, "15m Guilt-Free Pass"):
+            rpg = load_rpg_state()
+            now_ts = datetime.now().timestamp()
+            base_ts = max(now_ts, rpg.get("vip_pass_until_ts", 0.0))
+            rpg["vip_pass_until_ts"] = base_ts + (15 * 60)
+            save_rpg_state(rpg)
+            play_sound("Hero")
+            send_notification(
+                "🎟️ 15m VIP PASS ACTIVATED!",
+                "Guilt-Free Browsing Unlocked",
+                "Your streak & multiplier are frozen for 15 minutes!"
+            )
+            self._refresh_menu_labels()
+
+    def buy_elixir(self, _):
+        _, _, in_recovery, min_left, _, _ = get_stats_optimized()
+        if not in_recovery:
+            rumps.alert("No Cognitive Tax Active!", "Your neural pathways are already clear — save your 400 XP!")
+            return
+        if self._deduct_xp(400, "Neural Purge Elixir"):
+            rpg = load_rpg_state()
+            rpg["tax_purged_at_ts"] = datetime.now().timestamp() + 2.0
+            save_rpg_state(rpg)
+            play_sound("Hero")
+            send_notification(
+                "🧪 NEURAL ELIXIR CONSUMED!",
+                f"Cleared {min_left}m of Cognitive Tax!",
+                "100% XP rewards & Critical Hit rolls restored immediately!"
+            )
+            self._refresh_menu_labels()
+
+    def buy_shield(self, _):
+        rpg = load_rpg_state()
+        if rpg.get("shields", 0) >= 3:
+            rumps.alert("Shields Full! 🛡️", "You already hold the maximum 3/3 Aegis Shields!")
+            return
+        if self._deduct_xp(500, "Aegis Streak Shield"):
+            rpg = load_rpg_state()
+            rpg["shields"] = min(3, rpg.get("shields", 0) + 1)
+            save_rpg_state(rpg)
+            play_sound("Hero")
+            send_notification(
+                "🛡️ AEGIS SHIELD FORGED!",
+                f"Shield Inventory: {rpg['shields']}/3",
+                "Ready to automatically block your next -230 XP penalty!"
+            )
+            self._refresh_menu_labels()
+
+    def buy_overclock(self, _):
+        if self._deduct_xp(600, "30m 2x XP Overclock"):
+            rpg = load_rpg_state()
+            now_ts = datetime.now().timestamp()
+            base_ts = max(now_ts, rpg.get("overclock_until_ts", 0.0))
+            rpg["overclock_until_ts"] = base_ts + (30 * 60)
+            save_rpg_state(rpg)
+            play_sound("Hero")
+            send_notification(
+                "⚡ 2x OVERCLOCK ACTIVATED!",
+                "30 Minutes of Double XP!",
+                "All focus checks and Critical Hits now pay 200%!"
+            )
+            self._refresh_menu_labels()
 
     @rumps.clicked("🎮 Open Gamified Command Center")
     def open_command_center(self, _):
@@ -933,29 +1088,35 @@ class FocusTrackerApp(rumps.App):
             return
 
         now = datetime.now()
-        is_break, break_reason = is_break_time(now)
+        now_ts = now.timestamp()
+        rpg = load_rpg_state()
+
+        is_break, break_reason = is_break_time(now, rpg)
         if is_break:
             log_result_fast(f"Break ({break_reason})", 0)
+            self._refresh_menu_labels()
             return
 
-        rpg = load_rpg_state()
         d_pts, w_pts, in_recovery, minutes_left, streak, mult = get_stats_optimized()
+        _, wallet = get_lifetime_xp_and_wallet()
         active_app = get_active_app()
 
         play_sound("Submarine")
 
         shields_avail = rpg.get("shields", 0)
         shield_badge = "🛡️" * shields_avail if shields_avail > 0 else "None"
+        overclock_mult = 2 if now_ts < rpg.get("overclock_until_ts", 0.0) else 1
+        oc_tag = " [⚡2x OVERCLOCK!]" if overclock_mult == 2 else ""
         app_warning = f"\n🚨 Warning: Active on {active_app}!" if active_app in DISTRACTING_APPS else ""
 
         if in_recovery:
-            base_score = 2
-            status_msg = f"⚠️ COGNITIVE TAX ACTIVE ({minutes_left}m left)\nRewards reduced 80%.{app_warning}"
+            base_score = 2 * overclock_mult
+            status_msg = f"⚠️ COGNITIVE TAX ACTIVE ({minutes_left}m left){oc_tag}\n💡 Tip: Buy a Neural Elixir in the Menubar to purge tax!{app_warning}"
             yes_btn = f"Yes (+{base_score} XP)"
             no_btn = "Use Shield 🛡️" if shields_avail > 0 else "No (-230 XP)"
         else:
-            base_score = int(10 * mult)
-            status_msg = f"⚡ COMBO: {streak}m (🔥 {mult}x Multiplier)\n🛡️ Aegis Shields: {shield_badge}{app_warning}"
+            base_score = int(10 * mult) * overclock_mult
+            status_msg = f"⚡ COMBO: {streak}m (🔥 {mult}x Mult){oc_tag}\n🛡️ Shields: {shield_badge}  |  🪙 Wallet: {wallet} XP{app_warning}"
             yes_btn = f"Yes (+{base_score} XP + Loot Roll)"
             no_btn = "Block w/ Shield 🛡️" if shields_avail > 0 else "No (-230 Reset)"
 
@@ -973,7 +1134,6 @@ class FocusTrackerApp(rumps.App):
             output = proc.stdout.strip()
 
             if "gave up:true" in output or "No" in output or "Block" in output or "Shield" in output:
-                # Check if player has an Aegis Shield to block the distraction penalty!
                 if shields_avail > 0:
                     rpg["shields"] = shields_avail - 1
                     rpg["shields_saved_today"] = rpg.get("shields_saved_today", 0) + 1
@@ -992,13 +1152,11 @@ class FocusTrackerApp(rumps.App):
                     status_logged = f"No (App: {active_app})" if "No" in output else "No Response"
                     log_result_fast(status_logged, -230)
             elif "Yes" in output:
-                # Variable Ratio Dopamine Roll (Crit / Legendary Chest)
                 roll = random.random()
                 final_score = base_score
                 status_tag = "Yes"
 
                 if not in_recovery and roll < 0.03:
-                    # 3% Legendary Chest (5x)
                     final_score = base_score * 5
                     status_tag = "Yes (🎰 5x JACKPOT!)"
                     rpg["loot_Chests_today"] = rpg.get("loot_Chests_today", 0) + 1
@@ -1006,7 +1164,6 @@ class FocusTrackerApp(rumps.App):
                     play_sound("Hero")
                     send_notification("🎰 LEGENDARY LOOT CHEST!", f"+{final_score} XP JACKPOT!", "5x Multiplier Roll Landed!")
                 elif not in_recovery and roll < 0.15:
-                    # 12% Critical Hit (2x)
                     final_score = base_score * 2
                     status_tag = "Yes (⚡ 2x CRIT!)"
                     rpg["crit_hits_today"] = rpg.get("crit_hits_today", 0) + 1
@@ -1015,7 +1172,6 @@ class FocusTrackerApp(rumps.App):
                 else:
                     play_sound("Glass")
 
-                # Increment Shield Forge Counter
                 rpg["streak_shield_counter"] = rpg.get("streak_shield_counter", 0) + 1
                 if rpg["streak_shield_counter"] >= 45:
                     rpg["streak_shield_counter"] = 0
